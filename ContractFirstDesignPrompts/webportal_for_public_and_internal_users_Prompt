@@ -1,0 +1,198 @@
+//Quick jot dot down summarized 
+Here’s a drop-in package like last time—first the design deltas (what changes in data/flows), then a ready-to-paste Cursor prompt that will generate: (1) updated OpenAPI contract, (2) mock server + stubs, and (3) a Flutter “two-portal” app with role-based views.
+
+A) Design deltas — roles, portals, routing rules, entities
+Roles / user types
+
+Public (unauthenticated/anonymous or basic account): read-only portal: browse issues, upvote, view solutions, filters/sorting; no internal queues or triage actions.
+
+Internal (authenticated):
+
+Analyst: sees all internal dashboards, can tag, edit Eisenhower fields, queue for ThinkTank, propose solutions.
+
+Lieutenant: intake for “Urgent & Not Important” (delegate/assign).
+
+ThinkTankLead: runs sessions for “Important & Not Urgent”.
+
+HeadOfState: final owner for “Urgent & Important”; can mark “priority of week”.
+
+(You can collapse to a single “Internal” role with capability flags if you prefer.)
+
+Eisenhower classification on every Issue
+
+Add either a compact enum or a double-boolean. Recommend both for ergonomics:
+
+isUrgent (bool)
+
+isImportant (bool)
+
+eisenhowerQuadrant (enum: DO_FIRST | SCHEDULE | DELEGATE | ELIMINATE)
+Mapping:
+
+DO_FIRST = Urgent & Important (U&I)
+
+DELEGATE = Urgent & Not Important (U&¬I)
+
+SCHEDULE = Important & Not Urgent (¬U&I)
+
+ELIMINATE = Not Urgent & Not Important (¬U&¬I)
+
+Daily routing (automated triage)
+
+At 00:05 local time (configurable), run a triage job:
+
+ELIMINATE (¬U & ¬I) ➜ move to Backlog queue (publicly visible, upvotable).
+
+DELEGATE (U & ¬I) ➜ enqueue to Lieutenant Queue; auto-notify lieutenants; require assignment to an owner within 24h.
+
+SCHEDULE (¬U & I) ➜ enqueue to ThinkTank Queue; visible in prep list for weekly sessions.
+
+DO_FIRST (U & I) ➜ enqueue to HeadOfState Queue immediately; mark as High-Alert.
+
+Weekly prioritization (internal)
+
+Every Monday 09:00 generate a Weekly Priority Report:
+
+Rank by composite score: priorityScore = (urgency * 0.6) + (normalized uniqueSupportersInTree * 0.25) + (similarityCount * 0.1) + (resolvesCount * 0.05).
+
+Produce per-queue top N (configurable), with diffs vs last week.
+
+High-Alert definition (used to surface in internal portal)
+
+Flag High-Alert if any:
+
+urgency >= 80, or
+
+week-over-week upvote spike ≥ 50%, or
+
+Eisenhower = DO_FIRST.
+
+New/updated entities
+
+Issue (add fields)
+
+isUrgent: boolean
+
+isImportant: boolean
+
+eisenhowerQuadrant: EisenhowerQuadrant
+
+queue: enum ["BACKLOG","LIEUTENANT","THINKTANK","HEADOFSTATE", "NONE"] (server-managed by daily routing)
+
+isHighAlert: boolean (readOnly) (derived)
+
+priorityScore: number (readOnly) (computed for lists/dashboards)
+
+Assignment
+
+id (UUID)
+
+issueId (UUID)
+
+assigneeUserId (UUID)
+
+assignedByUserId (UUID)
+
+roleAtAssignment (enum: LIEUTENANT|THINKTANKLEAD|HEADOFSTATE)
+
+status (enum: OPEN|IN_PROGRESS|BLOCKED|DONE)
+
+notes (string)
+
+createdAt, updatedAt
+
+TriageRun
+
+id, ranAt, itemsMoved:{backlog, lieutenant, thinktank, headofstate}
+
+WeeklyReport
+
+id, weekOf (date), topBacklog: IssueListItem[], topLieutenant: IssueListItem[], topThinkTank: IssueListItem[], topHeadOfState: IssueListItem[]
+
+B) Cursor prompt — Two-portal app + contract-first updates
+
+Copy everything in the block below into Cursor.
+
+PROMPT FOR CURSOR
+
+You are a senior full-stack engineer. Extend the previous “Issue & Solution Hub” to support two portals (Public vs Internal) and Eisenhower routing. Do this in five steps:
+
+1) Update the OpenAPI 3.1 spec (openapi.yaml)
+
+Title: IssueSolutionHub API
+
+Version: 1.1.0
+
+Keep all prior schemas/paths; add/modify:
+
+New/updated schemas
+
+EisenhowerQuadrant enum: DO_FIRST | SCHEDULE | DELEGATE | ELIMINATE.
+
+Issue (add): isUrgent:boolean, isImportant:boolean, eisenhowerQuadrant:EisenhowerQuadrant, queue: "BACKLOG"|"LIEUTENANT"|"THINKTANK"|"HEADOFSTATE"|"NONE", isHighAlert:boolean (readOnly), priorityScore:number (readOnly).
+
+IssueUpdateRequest (allow updating urgency, isUrgent, isImportant, counterpointNotes, categories, tags).
+
+Assignment (see design above).
+
+TriageRun (see design above).
+
+WeeklyReport (see design above).
+
+Role enum: PUBLIC | ANALYST | LIEUTENANT | THINKTANKLEAD | HEADOFSTATE | ADMIN.
+
+New/updated paths
+
+POST /issues/{id} (PATCH semantics) — body: IssueUpdateRequest ➜ returns IssueDetail. (If you prefer REST purity, use PATCH.)
+
+POST /triage/runDaily — triggers routing per Eisenhower; returns TriageRun. (Guarded; internal only.)
+
+GET /dashboards/public — query params: filters (category, tags, sort, search); returns paged { items: IssueListItem[], ... } with public fields only (no internal notes, no assignments).
+
+GET /dashboards/internal/overview — returns summary cards: counts per queue, high-alerts, top N by priorityScore.
+
+GET /dashboards/internal/queue — query queue=BACKLOG|LIEUTENANT|THINKTANK|HEADOFSTATE + paging; returns paged issues with internal fields.
+
+POST /assignments — create assignment (internal).
+
+GET /assignments?issueId=... — list assignments for an issue.
+
+POST /reports/weekly:generate — returns WeeklyReport and stores it in memory (mock).
+
+GET /reports/weekly/latest — fetch latest WeeklyReport.
+
+Behavior notes to document in spec
+
+Public portal may upvote but cannot see internal queues/assignments.
+
+Daily triage: mapping of Eisenhower ➜ queue; isHighAlert if urgency>=80 or Eisenhower=DO_FIRST or recent spike.
+
+priorityScore formula (include example and field definitions).
+
+Security (mocked)
+
+Add a simple X-ROLE header for role simulation in mock server (PUBLIC by default).
+
+Spec examples should show role usage.
+
+2) Mock server + minimal server stubs
+
+Extend previous Node/Express (or FastAPI) mock:
+
+In-memory store for issues with new fields initialized.
+
+Endpoint /triage/runDaily re-computes: eisenhowerQuadrant (from booleans when provided) ➜ queue; sets isHighAlert; recomputes priorityScore.
+
+Endpoint /reports/weekly:generate computes weekly top lists with priorityScore.
+
+Middleware reads X-ROLE and limits internal endpoints.
+
+3) Regenerate Dart client
+
+Re-generate from openapi.yaml into /client/lib/api/.
+
+Ensure new models/enums/paths are available.
+
+4) Flutter two-portal app (Material 3, Riverpod)
+
+Structure:
