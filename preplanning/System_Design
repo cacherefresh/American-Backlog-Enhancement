@@ -1,0 +1,205 @@
+1) System design – entities, relationships, logic
+//Just some rough starters...datadump of my brain
+
+
+Core concepts
+
+Issue: A problem/concern raised by a user. Supports parent/child (sub-issue) relationships, similarity links, categories/labels, urgency, counterpoints, computed impact, and linked solutions.
+
+PotentialSolution: A reusable solution idea that can be linked to multiple issues (many-to-many).
+
+Category/Label (Tag): Controlled taxonomy (categories) plus optional freeform labels (tags).
+
+Upvote: Unique user endorsement of an issue (deduped by user across a tree for the roll-up metric).
+
+SimilarityLink: Connects issues that are semantically similar with a similarity score and “difference summary”.
+
+User: Minimal profile for attribution, auditing, and dedupe.
+
+Entity model (ERD-style description)
+
+User
+
+id (UUID, PK)
+
+displayName (string)
+
+email (string, unique)
+
+createdAt (datetime)
+
+Issue
+
+id (UUID, PK)
+
+title (string, required, indexed)
+
+description (string, long)
+
+urgency (int, 0–100, required) — independent of votes/similarity
+
+firstReportedDate (date, required) — when first reported to the org/community
+
+problemStartDate (date, nullable) — when it began (can be past or future)
+
+problemStartIsFuture (bool) — if the start date is a projected future risk
+
+counterpointNotes (string, long) — “why this is a feature, not a bug”
+
+similarityCount (int, computed) — # of SimilarityLinks (accepted/active)
+
+resolvesCount (int, computed) — # of unique issues (direct + subtree) this issue would resolve
+
+uniqueSupportersInTree (int, computed) — deduped user count across this issue + all descendants (see roll-up logic)
+
+createdByUserId (UUID, FK -> User)
+
+createdAt (datetime)
+
+updatedAt (datetime)
+
+Indexes: text index on title + description for search; btree on urgency, createdAt
+
+IssueHierarchy (for sub-issues)
+
+parentIssueId (UUID, FK -> Issue, PK part)
+
+childIssueId (UUID, FK -> Issue, PK part)
+
+Constraints: no cycles; parent ≠ child; cascading delete guarded
+
+SimilarityLink
+
+id (UUID, PK)
+
+issueAId (UUID, FK -> Issue)
+
+issueBId (UUID, FK -> Issue)
+
+similarityScore (float, 0–1) — cosine or Jaccard, etc.
+
+differenceSummary (string) — why it’s different; filled when user promotes to sub-issue
+
+status (enum: SUGGESTED | CONFIRMED | REJECTED) — suggested at submit; confirmed when user proceeds
+
+createdAt (datetime)
+
+Uniqueness: (min(issueAId, issueBId), max(issueAId, issueBId)) unique
+
+IssueCategory (join)
+
+issueId (UUID, FK -> Issue, PK part)
+
+categoryId (UUID, FK -> Category, PK part)
+
+Category
+
+id (UUID, PK)
+
+name (string, unique, required)
+
+description (string, optional)
+
+IssueTag (freeform labels)
+
+issueId (UUID, FK -> Issue, PK part)
+
+tag (string, PK part, normalized lower-case)
+
+Upvote
+
+issueId (UUID, FK -> Issue, PK part)
+
+userId (UUID, FK -> User, PK part)
+
+createdAt (datetime)
+
+Constraint: unique (issueId, userId)
+
+PotentialSolution
+
+id (UUID, PK)
+
+title (string, required)
+
+summary (string, long)
+
+estimatedCost (number, currency in API contract) — can be structured as {amount, currency}
+
+timeToDeliver (duration ISO8601 or int days)
+
+resourcesNeeded (string/array)
+
+estimatedTimeSavedPerPeriod (duration or int minutes/week) — quantify savings
+
+valueAddNotes (string) — e.g., accessibility, safety, equity, etc.
+
+createdByUserId (UUID, FK -> User)
+
+createdAt (datetime)
+
+updatedAt (datetime)
+
+(the other times - planning began, deployed, resolved, expected lingering (can be createdin subticket etc) At (datetime)
+IssueSolution (join)
+
+issueId (UUID, FK -> Issue, PK part)
+
+solutionId (UUID, FK -> PotentialSolution, PK part)
+
+rank (int, optional) — UI ordering
+
+notes (string, optional)
+
+Critical behaviors & algorithms
+1) Submit issue flow with similarity check
+
+Client calls POST /issues:checkAndMaybeCreate with title/description/categories/tags/urgency/dates.
+
+Server normalizes text (lowercase, strip HTML), vectorizes (title + description) using simple TF-IDF or embeddings (configurable).
+
+Retrieve top-k similar issues (k=10, threshold=0.75 example).
+
+Response returns:
+
+similarIssues: [{issue, similarityScore}]
+
+If none above threshold, server creates issue immediately and returns created entity.
+
+If some above threshold, do not create yet; return suggestions for user decision.
+
+If user selects an existing issue and claims it’s different:
+
+User supplies differenceSummary.
+
+Server creates a new Issue and:
+
+Creates IssueHierarchy(parent=selectedIssue, child=newIssue).
+
+Creates SimilarityLink(issueA=selectedIssue, issueB=newIssue, status=CONFIRMED, differenceSummary=...).
+
+2) Upvotes and roll-up metric
+
+Local upvotes: GET /issues/{id} includes localUpvotesCount.
+
+Tree unique supporters:
+
+Compute unique userId set across the node and all descendants (via DAG-safe traversal).
+
+If a user upvoted both a parent and a child, count only once for the parent’s uniqueSupportersInTree.
+
+Maintain a materialized roll-up table or cache updated via triggers/queues for performance.
+
+3) similarityCount
+
+similarityCount = count(SimilarityLink where status=CONFIRMED and (issueAId=issue.id OR issueBId=issue.id))
+
+4) resolvesCount
+
+Meaning: “How many other issues this would resolve if addressed.”
+
+Implementation options:
+
+Manual: a field maintained by moderators or solution authors.
+
+Automatic (recommended): if an issue is parent to many sub-issues, or linked via IssueSolution to solutions that also link to multiple issues, compute:
