@@ -1,0 +1,890 @@
+openapi: 3.1.0
+info:
+  title: Abe Portal API / whatever we deside to call this for a more perfect union
+  version: 0.1.0
+  description: |
+    Contract-first API for a public/internal issue & solution portal with Eisenhower-based routing.
+    - Public portal: read-only browsing + upvoting.
+    - Internal portal: queues (Backlog, Lieutenant, ThinkTank, HeadOfState), daily triage, weekly reports.
+    - Similarity check on issue submission; sub-issues link to parents with difference summaries.
+    - //much still to do - ensuring people get one vote, addressing timeline/urgency, and actually moving forward with action plan etc. 
+servers:
+  - url: http://localhost:8080
+    description: Local mock server
+
+tags:
+  - name: Issues
+  - name: Solutions
+  - name: Dashboards
+  - name: Triage
+  - name: Reports
+  - name: Assignments
+  - name: Taxonomy
+
+paths:
+  /issues:checkAndMaybeCreate:
+    post:
+      tags: [Issues]
+      summary: Check for similar issues; create immediately if none exceed threshold
+      description: |
+        Runs semantic similarity on (title+description). If any candidate >= threshold (e.g., 0.75),
+        the server returns the similar list and **does not** create yet.
+        Otherwise, creates the issue and returns it.
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IssueCreateRequest' }
+      responses:
+        '200':
+          description: Created or suggestions returned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckAndMaybeCreateResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /issues:
+    post:
+      tags: [Issues]
+      summary: Create issue directly (bypass similarity gate)
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IssueCreateRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+    get:
+      tags: [Issues]
+      summary: Search & list issues (public or internal, role-aware)
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - in: query
+          name: text
+          schema: { type: string }
+        - in: query
+          name: categories
+          description: Comma-separated category names
+          schema: { type: string }
+        - in: query
+          name: tags
+          description: Comma-separated tags (lowercase normalized)
+          schema: { type: string }
+        - in: query
+          name: urgencyMin
+          schema: { type: integer, minimum: 0, maximum: 100 }
+        - in: query
+          name: urgencyMax
+          schema: { type: integer, minimum: 0, maximum: 100 }
+        - in: query
+          name: sortBy
+          schema:
+            type: string
+            enum: [MOST_URGENT, MOST_UPVOTED, MOST_SIMILAR, NEWEST, HIGHEST_RESOLVES, PRIORITY_SCORE]
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Paged list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/IssueListItem' }
+                  page: { type: integer, minimum: 1 }
+                  pageSize: { type: integer, minimum: 1, maximum: 200 }
+                  total: { type: integer, minimum: 0 }
+
+  /issues/{id}:
+    get:
+      tags: [Issues]
+      summary: Get issue detail
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          description: Issue detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Issues]
+      summary: Update issue (urgency, Eisenhower toggles, notes, categories, tags)
+      security:
+        - RoleHeader: [ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IssueUpdateRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /issues/{id}/upvotes:
+    post:
+      tags: [Issues]
+      summary: Upvote an issue (deduped per user; tree roll-up computed server-side)
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpvoteRequest' }
+      responses:
+        '200':
+          description: Updated counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  localUpvotesCount: { type: integer, minimum: 0 }
+                  uniqueSupportersInTree: { type: integer, minimum: 0 }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /issues/{id}/sub-issues:
+    post:
+      tags: [Issues]
+      summary: Create a sub-issue and confirm similarity link with difference summary
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/IssueCreateRequest'
+                - type: object
+                  properties:
+                    differenceSummary:
+                      type: string
+                      minLength: 1
+      responses:
+        '201':
+          description: Sub-issue created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /issues/{id}/similar:
+    get:
+      tags: [Issues]
+      summary: Get similar issues for an issue
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          description: Similar issues
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SimilarityCheckResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /issues/{id}/solutions:
+    post:
+      tags: [Issues, Solutions]
+      summary: Link an existing solution to an issue (optionally rank & notes)
+      security:
+        - RoleHeader: [ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PotentialSolutionLink' }
+      responses:
+        '200':
+          description: Updated issue detail with linked solutions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /issues/{id}/solutions/{solutionId}:
+    delete:
+      tags: [Issues, Solutions]
+      summary: Unlink a solution from an issue
+      security:
+        - RoleHeader: [ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+        - in: path
+          name: solutionId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Unlinked }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /solutions:
+    post:
+      tags: [Solutions]
+      summary: Create a potential solution
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PotentialSolutionCreateRequest' }
+      responses:
+        '201':
+          description: Created solution
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PotentialSolution' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+    get:
+      tags: [Solutions]
+      summary: List solutions
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - in: query
+          name: text
+          schema: { type: string }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Paged solutions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/PotentialSolution' }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+                  total: { type: integer }
+
+  /solutions/{id}:
+    get:
+      tags: [Solutions]
+      summary: Get solution detail
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Solution detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PotentialSolution' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /issues/{id}/categories:
+    post:
+      tags: [Taxonomy, Issues]
+      summary: Set curated categories for an issue
+      security:
+        - RoleHeader: [ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                categories:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /issues/{id}/tags:
+    post:
+      tags: [Taxonomy, Issues]
+      summary: Add freeform tags to an issue (normalized lowercase)
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tags:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /categories:
+    get:
+      tags: [Taxonomy]
+      summary: List curated categories
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      responses:
+        '200':
+          description: Categories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        description: { type: string }
+
+  /dashboards/public:
+    get:
+      tags: [Dashboards]
+      summary: Public portal list (role-limited fields)
+      security:
+        - RoleHeader: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - in: query
+          name: text
+          schema: { type: string }
+        - in: query
+          name: sortBy
+          schema:
+            type: string
+            enum: [MOST_URGENT, MOST_UPVOTED, RISING, MOST_SIMILAR, NEWEST, HIGHEST_RESOLVES]
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Paged public issues
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/IssueListItem' }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+                  total: { type: integer }
+
+  /dashboards/internal/overview:
+    get:
+      tags: [Dashboards]
+      summary: Internal overview cards & high-alerts
+      security:
+        - RoleHeader: [ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      responses:
+        '200':
+          description: Overview
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  counts:
+                    type: object
+                    properties:
+                      BACKLOG: { type: integer }
+                      LIEUTENANT: { type: integer }
+                      THINKTANK: { type: integer }
+                      HEADOFSTATE: { type: integer }
+                  highAlerts:
+                    type: array
+                    items: { $ref: '#/components/schemas/IssueListItem' }
+                  topByPriority:
+                    type: array
+                    items: { $ref: '#/components/schemas/IssueListItem' }
+
+  /dashboards/internal/queue:
+    get:
+      tags: [Dashboards]
+      summary: Internal queue view
+      security:
+        - RoleHeader: [ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - in: query
+          name: queue
+          required: true
+          schema:
+            type: string
+            enum: [BACKLOG, LIEUTENANT, THINKTANK, HEADOFSTATE]
+        - in: query
+          name: sortBy
+          schema:
+            type: string
+            enum: [PRIORITY_SCORE, MOST_URGENT, MOST_UPVOTED, HIGHEST_RESOLVES, NEWEST]
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Paged queue items
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/IssueListItem' }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+                  total: { type: integer }
+
+  /triage/runDaily:
+    post:
+      tags: [Triage]
+      summary: Run Eisenhower-based daily routing
+      security:
+        - RoleHeader: [ADMIN]
+      responses:
+        '200':
+          description: Triage results
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TriageRun' }
+
+  /reports/weekly:generate:
+    post:
+      tags: [Reports]
+      summary: Generate weekly priority report
+      security:
+        - RoleHeader: [ANALYST, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      responses:
+        '200':
+          description: Generated report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WeeklyReport' }
+
+  /reports/weekly/latest:
+    get:
+      tags: [Reports]
+      summary: Get latest weekly report
+      security:
+        - RoleHeader: [ANALYST, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      responses:
+        '200':
+          description: Latest report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WeeklyReport' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /assignments:
+    post:
+      tags: [Assignments]
+      summary: Create an assignment for an issue
+      security:
+        - RoleHeader: [LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Assignment' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Assignment' }
+
+    get:
+      tags: [Assignments]
+      summary: List assignments for an issue
+      security:
+        - RoleHeader: [ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+      parameters:
+        - in: query
+          name: issueId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Assignments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Assignment' }
+
+components:
+  securitySchemes:
+    RoleHeader:
+      type: apiKey
+      in: header
+      name: X-ROLE
+      description: Mock role header. One of PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN.
+
+  parameters:
+    IssueId:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: pageSize
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Role:
+      type: string
+      enum: [PUBLIC, ANALYST, LIEUTENANT, THINKTANKLEAD, HEADOFSTATE, ADMIN]
+
+    EisenhowerQuadrant:
+      type: string
+      enum: [DO_FIRST, SCHEDULE, DELEGATE, ELIMINATE]
+      description: |
+        DO_FIRST = Urgent & Important
+        DELEGATE  = Urgent & Not Important
+        SCHEDULE  = Important & Not Urgent
+        ELIMINATE = Not Urgent & Not Important
+
+    Money:
+      type: object
+      properties:
+        amount: { type: number }
+        currency: { type: string, example: USD }
+      required: [amount, currency]
+
+    DurationValue:
+      type: object
+      properties:
+        unit:
+          type: string
+          enum: [minutes, hours, days, weeks, months, minutes_per_week, hours_per_week]
+        value:
+          type: integer
+      required: [unit, value]
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        displayName: { type: string }
+        email: { type: string, format: email }
+        createdAt: { type: string, format: date-time }
+      required: [id, displayName, email, createdAt]
+
+    PotentialSolution:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        summary: { type: string }
+        estimatedCost: { $ref: '#/components/schemas/Money' }
+        timeToDeliver: { $ref: '#/components/schemas/DurationValue' }
+        resourcesNeeded:
+          type: array
+          items: { type: string }
+        estimatedTimeSavedPerPeriod: { $ref: '#/components/schemas/DurationValue' }
+        valueAddNotes: { type: string }
+        createdByUserId: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, title, createdByUserId, createdAt, updatedAt]
+
+    PotentialSolutionCreateRequest:
+      type: object
+      properties:
+        title: { type: string }
+        summary: { type: string }
+        estimatedCost: { $ref: '#/components/schemas/Money' }
+        timeToDeliver: { $ref: '#/components/schemas/DurationValue' }
+        resourcesNeeded:
+          type: array
+          items: { type: string }
+        estimatedTimeSavedPerPeriod: { $ref: '#/components/schemas/DurationValue' }
+        valueAddNotes: { type: string }
+      required: [title]
+
+    PotentialSolutionLink:
+      type: object
+      properties:
+        solutionId: { type: string, format: uuid }
+        rank: { type: integer }
+        notes: { type: string }
+      required: [solutionId]
+
+    IssueBase:
+      type: object
+      properties:
+        title: { type: string }
+        description: { type: string }
+        urgency:
+          type: integer
+          minimum: 0
+          maximum: 100
+        firstReportedDate: { type: string, format: date }
+        problemStartDate: { type: string, format: date, nullable: true }
+        problemStartIsFuture: { type: boolean, default: false }
+        counterpointNotes: { type: string }
+        categories:
+          type: array
+          items: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        isUrgent: { type: boolean }
+        isImportant: { type: boolean }
+        eisenhowerQuadrant: { $ref: '#/components/schemas/EisenhowerQuadrant' }
+      required: [title, urgency, firstReportedDate]
+
+    Issue:
+      allOf:
+        - $ref: '#/components/schemas/IssueBase'
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            similarityCount: { type: integer, readOnly: true }
+            resolvesCount: { type: integer, readOnly: true }
+            uniqueSupportersInTree: { type: integer, readOnly: true }
+            createdByUserId: { type: string, format: uuid }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+            parentId:
+              type: string
+              format: uuid
+              nullable: true
+            queue:
+              type: string
+              enum: [BACKLOG, LIEUTENANT, THINKTANK, HEADOFSTATE, NONE]
+            isHighAlert: { type: boolean, readOnly: true }
+            priorityScore: { type: number, readOnly: true }
+          required: [id, createdByUserId, createdAt, updatedAt]
+
+    IssueCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/IssueBase'
+
+    IssueUpdateRequest:
+      type: object
+      description: Partial update for editable fields.
+      properties:
+        title: { type: string }
+        description: { type: string }
+        urgency: { type: integer, minimum: 0, maximum: 100 }
+        firstReportedDate: { type: string, format: date }
+        problemStartDate: { type: string, format: date, nullable: true }
+        problemStartIsFuture: { type: boolean }
+        counterpointNotes: { type: string }
+        categories:
+          type: array
+          items: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        isUrgent: { type: boolean }
+        isImportant: { type: boolean }
+        eisenhowerQuadrant: { $ref: '#/components/schemas/EisenhowerQuadrant' }
+
+    IssueListItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        urgency: { type: integer }
+        localUpvotesCount: { type: integer }
+        similarityCount: { type: integer }
+        resolvesCount: { type: integer }
+        uniqueSupportersInTree: { type: integer }
+        categories:
+          type: array
+          items: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        createdAt: { type: string, format: date-time }
+        queue:
+          type: string
+          enum: [BACKLOG, LIEUTENANT, THINKTANK, HEADOFSTATE, NONE]
+        isHighAlert: { type: boolean }
+        priorityScore: { type: number }
+        eisenhowerQuadrant: { $ref: '#/components/schemas/EisenhowerQuadrant' }
+
+    SimilarIssue:
+      type: object
+      properties:
+        issue: { $ref: '#/components/schemas/IssueListItem' }
+        similarityScore:
+          type: number
+          minimum: 0
+          maximum: 1
+        status:
+          type: string
+          enum: [SUGGESTED, CONFIRMED, REJECTED]
+        differenceSummary:
+          type: string
+
+    SimilarityCheckResponse:
+      type: object
+      properties:
+        similarIssues:
+          type: array
+          items: { $ref: '#/components/schemas/SimilarIssue' }
+
+    CheckAndMaybeCreateResponse:
+      type: object
+      description: Exactly one of `created` or `similarIssues` will be present.
+      properties:
+        created:
+          $ref: '#/components/schemas/IssueDetail'
+        similarIssues:
+          type: array
+          items: { $ref: '#/components/schemas/SimilarIssue' }
+
+    IssueDetail:
+      allOf:
+        - $ref: '#/components/schemas/Issue'
+        - type: object
+          properties:
+            children:
+              type: array
+              items: { $ref: '#/components/schemas/IssueListItem' }
+            similarIssues:
+              type: array
+              items: { $ref: '#/components/schemas/SimilarIssue' }
+            linkedSolutions:
+              type: array
+              items: { $ref: '#/components/schemas/PotentialSolutionLink' }
+            localUpvotesCount: { type: integer }
+
+    UpvoteRequest:
+      type: object
+      properties:
+        userId: { type: string, format: uuid }
+      required: [userId]
+
+    Assignment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        issueId: { type: string, format: uuid }
+        assigneeUserId: { type: string, format: uuid }
+        assignedByUserId: { type: string, format: uuid }
+        roleAtAssignment:
+          type: string
+          enum: [LIEUTENANT, THINKTANKLEAD, HEADOFSTATE]
+        status:
+          type: string
+          enum: [OPEN, IN_PROGRESS, BLOCKED, DONE]
+        notes: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, issueId, assigneeUserId, assignedByUserId, roleAtAssignment, status, createdAt, updatedAt]
+
+    TriageRun:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        ranAt: { type: string, format: date-time }
+        itemsMoved:
+          type: object
+          properties:
+            BACKLOG: { type: integer }
+            LIEUTENANT: { type: integer }
+            THINKTANK: { type: integer }
+            HEADOFSTATE: { type: integer }
+
+    WeeklyReport:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        weekOf: { type: string, format: date }
+        topBacklog:
+          type: array
+          items: { $ref: '#/components/schemas/IssueListItem' }
+        topLieutenant:
+          type: array
+          items: { $ref: '#/components/schemas/IssueListItem' }
+        topThinkTank:
+          type: array
+          items: { $ref: '#/components/schemas/IssueListItem' }
+        topHeadOfState:
+          type: array
+          items: { $ref: '#/components/schemas/IssueListItem' }
+        notes:
+          type: string
+      required: [id, weekOf]
+
+    Problem:
+      type: object
+      properties:
+        type: { type: string, example: about:blank }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+
+security:
+  - RoleHeader: []
