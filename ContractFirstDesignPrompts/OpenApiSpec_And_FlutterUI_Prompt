@@ -1,0 +1,101 @@
+PROMPT FOR CURSOR
+
+You are a senior full-stack engineer. Build a contract-first system for an “Issue & Solution Hub” as specified below. Do the work in this order:
+
+A) Produce an OpenAPI 3.1 spec (openapi.yaml)
+
+Use title: IssueSolutionHub API
+
+Version: 1.0.0
+
+Servers: http://localhost:8080
+
+Schemas (match exactly unless you propose improvements with comments):
+
+User { id: UUID, displayName, email, createdAt }
+
+Issue { id, title*, description, urgency (0–100), firstReportedDate, problemStartDate?, problemStartIsFuture (bool), counterpointNotes, similarityCount (int, readOnly), resolvesCount (int, readOnly), uniqueSupportersInTree (int, readOnly), createdByUserId, createdAt, updatedAt, categories: string[], tags: string[] }
+
+IssueCreateRequest { title*, description, urgency*, firstReportedDate*, problemStartDate?, problemStartIsFuture?, counterpointNotes?, categories?, tags? }
+
+IssueSearchQuery { text?, categories?, tags?, urgencyMin?, urgencyMax?, sortBy? = ["MOST_URGENT","MOST_UPVOTED","MOST_SIMILAR","NEWEST","HIGHEST_RESOLVES"] , page?, pageSize? }
+
+IssueListItem (subset for lists) { id, title, urgency, localUpvotesCount, similarityCount, resolvesCount, uniqueSupportersInTree, categories, tags, createdAt }
+
+IssueDetail extends Issue plus: localUpvotesCount (int, readOnly), parentId?, children: IssueListItem[], similarIssues: SimilarIssue[], linkedSolutions: PotentialSolutionLink[]
+
+SimilarIssue { issue: IssueListItem, similarityScore (0..1), status: ["SUGGESTED","CONFIRMED","REJECTED"], differenceSummary? }
+
+PotentialSolution { id, title*, summary, estimatedCost: { amount: number, currency: "USD"|"EUR"|string }, timeToDeliver: { unit: "days"|"weeks"|"months", value: int }, resourcesNeeded: string[], estimatedTimeSavedPerPeriod: { unit: "minutes_per_week"|"hours_per_week", value: int }, valueAddNotes, createdByUserId, createdAt, updatedAt }
+
+PotentialSolutionCreateRequest same fields minus IDs/readonly
+
+PotentialSolutionLink { solutionId, rank?, notes? }
+
+UpvoteRequest { userId }
+
+SimilarityCheckResponse { similarIssues: SimilarIssue[] }
+
+CheckAndMaybeCreateResponse { created?: IssueDetail, similarIssues?: SimilarIssue[] } // if similar above threshold, do NOT create; else return created
+
+Standard Problem for errors.
+
+Paths (define request/response bodies, params, and examples):
+
+POST /issues:checkAndMaybeCreate — body: IssueCreateRequest; returns CheckAndMaybeCreateResponse
+
+POST /issues — direct create (bypass check); returns IssueDetail
+
+GET /issues — query via IssueSearchQuery (query params); returns { items: IssueListItem[], page, pageSize, total }
+
+GET /issues/{id} — returns IssueDetail
+
+POST /issues/{id}/upvotes — body: UpvoteRequest; returns { localUpvotesCount, uniqueSupportersInTree }
+
+POST /issues/{id}/sub-issues — body: IssueCreateRequest + differenceSummary (string); creates a child AND a SimilarityLink with status=CONFIRMED; returns the new child IssueDetail
+
+GET /issues/{id}/similar — returns SimilarityCheckResponse
+
+POST /issues/{id}/solutions — body: PotentialSolutionLink; links existing solution, returns updated IssueDetail
+
+DELETE /issues/{id}/solutions/{solutionId} — unlink
+
+POST /solutions — create PotentialSolution
+
+GET /solutions — list with basic filters
+
+GET /solutions/{id} — detail
+
+POST /issues/{id}/categories — body: { categories: string[] } (curated names)
+
+POST /issues/{id}/tags — body: { tags: string[] } (freeform, normalize lower-case)
+
+GET /categories — list curated categories
+
+Components:
+
+Response codes with examples
+
+Error Problem shape with RFC7807 style
+
+Document the similarity threshold behavior (e.g., 0.75) and that creation is withheld when suggestions exist until the user confirms “different” with a differenceSummary.
+
+B) Create a runnable mock server and minimal server stubs
+
+Provide a Node/Express or FastAPI mock backing the OpenAPI (choose one and justify briefly in comments).
+
+Return realistic sample data for list/detail endpoints.
+
+Implement an in-memory similarity function (e.g., TF-IDF cosine on title+description) to drive /issues:checkAndMaybeCreate and /issues/{id}/similar.
+
+C) Generate a Dart API client from the spec
+
+Use Dart with either retrofit.dart or chopper (choose one; include instructions).
+
+Output: /client/lib/api containing models and services, with proper null-safety and enums.
+
+Include a sample ApiClientFactory that reads base URL from an env/config.
+
+D) Scaffold a Flutter app (Material 3) using Riverpod (or Bloc)
+
+Folder structure:
